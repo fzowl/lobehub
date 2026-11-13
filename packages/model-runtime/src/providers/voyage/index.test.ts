@@ -103,14 +103,11 @@ describe('LobeVoyageAI', () => {
       expect(error.error.message).toContain('supports output dimensions');
     });
 
-    it.each([[[]], [['ok', '']], [['  ']], [''] as unknown[]])(
-      'rejects empty input %j',
-      async (input) => {
-        const error = await rejects({ input: input as string[], model: 'voyage-4' });
+    it.each([[[]], [['ok', '']], [''] as unknown[]])('rejects empty input %j', async (input) => {
+      const error = await rejects({ input: input as string[], model: 'voyage-4' });
 
-        expect(error.errorType).toBe(AgentRuntimeErrorType.InvalidRequestFormat);
-      },
-    );
+      expect(error.errorType).toBe(AgentRuntimeErrorType.InvalidRequestFormat);
+    });
   });
 
   describe('text embeddings', () => {
@@ -189,6 +186,30 @@ describe('LobeVoyageAI', () => {
       expect(error).toMatchObject({ errorType: AgentRuntimeErrorType.ProviderBizError });
       expect(error.error.message).toContain('token usage');
       expect(onUsage).not.toHaveBeenCalled();
+    });
+
+    it('still reports the tokens of the batches that were charged when a later batch fails', async () => {
+      fetchMock.mockImplementation(async (_url, init) => {
+        const { input } = JSON.parse((init as RequestInit).body as string);
+        // The second batch (one input) keeps failing, also through the SDK's retries.
+        if (input.length === 1) return json({ detail: 'Voyage is down' }, 500);
+        return json(embedResponse(input.length, 7));
+      });
+      const onUsage = vi.fn();
+
+      const error = await runtime
+        .embeddings(
+          {
+            input: Array.from({ length: VOYAGE_MAX_INPUTS_PER_REQUEST + 1 }, (_, i) => `t${i}`),
+            model: 'voyage-4-lite',
+          },
+          { onUsage },
+        )
+        .catch((e) => e);
+
+      expect(error).toMatchObject({ errorType: AgentRuntimeErrorType.ProviderBizError });
+      expect(onUsage).toHaveBeenCalledTimes(1);
+      expect(onUsage.mock.calls[0][0]).toMatchObject({ totalTokens: 7 });
     });
 
     it('fails when the API returns a different number of vectors than inputs', async () => {

@@ -103,12 +103,17 @@ export class LobeVoyageAI implements LobeRuntimeAI {
   }
 
   async embeddings(payload: EmbeddingsPayload, options?: EmbeddingsOptions): Promise<Embeddings[]> {
+    // Tokens Voyage already charged; kept outside the try so a later batch that fails
+    // still bills the batches before it.
+    let billedModel: string | undefined;
+    let totalTokens = 0;
+
     try {
       const { definition, inputs, model, outputDimension } = this.resolveRequest(payload);
       const requestOptions = { abortSignal: options?.signal, headers: options?.headers };
+      billedModel = model;
 
       const vectors: Embeddings[] = [];
-      let totalTokens = 0;
 
       for (let start = 0; start < inputs.length; start += VOYAGE_MAX_INPUTS_PER_REQUEST) {
         const batch = inputs.slice(start, start + VOYAGE_MAX_INPUTS_PER_REQUEST);
@@ -151,6 +156,11 @@ export class LobeVoyageAI implements LobeRuntimeAI {
 
       return vectors;
     } catch (error) {
+      if (billedModel && totalTokens > 0) {
+        // Best effort: the request error is the one the caller must see.
+        await this.reportUsage(billedModel, totalTokens, options).catch(() => {});
+      }
+
       throw this.toRuntimeError(error);
     }
   }
@@ -177,7 +187,7 @@ export class LobeVoyageAI implements LobeRuntimeAI {
 
     if (inputs.length === 0) throw new VoyageRequestError('Embedding input must not be empty.');
 
-    if (inputs.some((item) => typeof item !== 'string' || item.trim() === '')) {
+    if (inputs.some((item) => typeof item !== 'string' || item === '')) {
       throw new VoyageRequestError('Embedding input must be non-empty strings.');
     }
 
@@ -214,7 +224,8 @@ export class LobeVoyageAI implements LobeRuntimeAI {
     result: ContextualizedEmbedResult,
     expectedDocuments: number,
   ): Embeddings[] {
-    const documents = [...result.results].sort((a, b) => a.index - b.index);
+    // The SDK numbers `results` by response position, so the API's order is kept as is.
+    const documents = result.results;
 
     if (documents.length !== expectedDocuments) {
       throw new VoyageRequestError(
@@ -224,9 +235,9 @@ export class LobeVoyageAI implements LobeRuntimeAI {
     }
 
     return documents.flatMap((document) => {
-      if (document.embeddings.length === 0) {
+      if (document.embeddings.length === 0 || document.embeddings.some((v) => v.length === 0)) {
         throw new VoyageRequestError(
-          'Voyage returned a document without any chunk embeddings.',
+          'Voyage returned a document without usable chunk embeddings.',
           AgentRuntimeErrorType.ProviderBizError,
         );
       }
